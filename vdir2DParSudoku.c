@@ -85,8 +85,6 @@ int main(int argc, char **argv )
     // Mesh line fixed by value of coordinate i1.
     int tag = 0;
     MPI_Status status;
-    MPI_Request recvRequest = MPI_REQUEST_NULL;
-    MPI_Request sendRequest = MPI_REQUEST_NULL;
     FILE *FL = NULL;
 
     clock_t cp1, cp2;
@@ -189,7 +187,9 @@ int main(int argc, char **argv )
     int iMaxTile1_Size = iPLineCountX2[0];
     int iMaxTile2_Size = iPLineCountX1[0];
 
-    // For each tile we should have a column to receive solutions from previous process in reverse stage, except last tile
+    // For each tile we should have a column to receive solutions from previous process in reverse stage.
+    // For comfort we have column on each boundary of tile,
+    // but both of them will be used only for first tile in X1 direction.
     int iX1_YLineSize = n1 - 1 + 2 * iPCount;
 
     // Memory allocation to store mesh data and coefficients of linear equations
@@ -250,22 +250,17 @@ int main(int argc, char **argv )
 
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    // If i1_gl is not 0, process receives by wait() bound values of coefficients
+                    // If i1_gl is not 0, process receives bound values of coefficients
                     // alpha and beta from process iPrevRank for current tile.
-                    // Then, it starts nonblocking receive for bound values
-                    // of coefficients alpha and beta which belong to the next tile i1_gl + 1.
                     // If i1_gl is 0, processes calculates all coefficients alpha(1,i2) and beta(1,i2)
 
-                    if (i1_gl > 0)
-                        MPI_Wait(&recvRequest, &status);
-
-                    if (i1_gl < iPCount - 1)
+                    if (i1_gl != 0)
                     {
-                        MPI_Irecv(dAlphaBetaX2 + (i1_gl + 1) * iBufferABTileSize, iMaxTile2_Size << 1, MPI_DOUBLE,
-                                  iPrevRank, tag, MPI_COMM_WORLD, &recvRequest);
+                        MPI_Recv(dAlphaBetaX2, iMaxTile2_Size << 1, MPI_DOUBLE, iPrevRank, tag, MPI_COMM_WORLD,
+                                 &status);
                     }
-
-                    if (i1_gl == 0) {
+                    else
+                        {
                         for (i2 = 1, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos;
                              i2 <= iCurTile2_Size;
                              i2++, x2 += h2, pABInLinePos += 2) {
@@ -328,18 +323,13 @@ int main(int argc, char **argv )
 
                     // If i1_gl is not last tile, process sends bound values of coefficients alpha and beta
                     // to process iNextRank.
-                    // All processes send their data in nonblocking mode.
                     if (i1_gl != iPCount - 1) {
-                        MPI_Wait(&sendRequest, &status);
-                        MPI_Isend(pABLine, iCurTile1_Size << 1, MPI_DOUBLE,
-                                  iNextRank, tag, MPI_COMM_WORLD, &sendRequest);
+                        MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
                     }
 
                 }
             }
         }
-
-        MPI_Wait(&sendRequest, &status);
 
 
         ////////////////////////////////////////////////////////////////////////////////////
@@ -359,20 +349,17 @@ int main(int argc, char **argv )
 
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    if (i1_gl < iPCount - 1)
-                        MPI_Wait(&recvRequest, &status);
-
-                    if (i1_gl > 0) {
-                        MPI_Datatype coltype;
-                        MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
-                        MPI_Type_commit(&coltype);
-                        MPI_Irecv( pYCurrentStartPos - iCurTile1_Size - 2, 1, coltype, iNextRank, tag, MPI_COMM_WORLD, &recvRequest );
-                    }
-
                     pABLastLine = pABStartPos + iCurTile1_Size * (iCurTile2_Size << 1);
                     pYLastCol = pYCurrentStartPos;
 
-                    if (i1_gl == iPCount - 1)
+                    if (i1_gl != iPCount - 1)
+                    {
+                        MPI_Datatype coltype;
+                        MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
+                        MPI_Type_commit(&coltype);
+                        MPI_Recv( pYCurrentStartPos - iCurTile1_Size - 2, 1, coltype, iNextRank, tag, MPI_COMM_WORLD, &status );
+                    }
+                    else
                     {
                         for (i2 = 0, x2 = pX2start[i2_gl], pABInLinePos = pABLastLine;
                              i2 < iCurTile2_Size;
@@ -401,15 +388,12 @@ int main(int argc, char **argv )
                     }
 
                     // If i1_gl is not zero, process sends bound values of solution to process iPrevRank.
-                    // All processes send their data in nonblocking mode
                     if (i1_gl != 0)
                     {
-                        MPI_Wait(&sendRequest, &status);
-
                         MPI_Datatype coltype;
                         MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
                         MPI_Type_commit(&coltype);
-                        MPI_Isend(pYCurrentCol + 1, 1, coltype, iPrevRank, tag, MPI_COMM_WORLD, &sendRequest);
+                        MPI_Send(pYCurrentCol + 1, 1, coltype, iPrevRank, tag, MPI_COMM_WORLD);
                     }
 
                     // Initialize boundary values at x2 = 0 and x2 = L2
@@ -431,7 +415,6 @@ int main(int argc, char **argv )
             }
         }
 
-        MPI_Wait(&sendRequest, &status);
         tag++;
 
         //--------------------------------------------------------//
@@ -460,24 +443,14 @@ int main(int argc, char **argv )
 
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    // If i2_gl is not 0, process receives by wait() bound values of coefficients
+                    // If i2_gl is not 0, process receives bound values of coefficients
                     // alpha and beta from process iPrevRank for current tile.
-                    // Then, it starts nonblocking receive for bound values
-                    // of coefficients alpha and beta which belong to the next tile with i2_gl + 1.
                     // If i2_gl is 0, processes calculates all coefficients alpha(i1,1) and beta(i1,1)
 
-                    if (i2_gl > 0) {
-                        MPI_Wait(&recvRequest, &status);
+                    if (i2_gl != 0) {
+                        MPI_Recv(pABStartPos, iMaxTile1_Size << 1, MPI_DOUBLE, iPrevRank, tag, MPI_COMM_WORLD, &status);
                     }
-
-                    if (i2_gl < iPCount - 1) {
-                        i1_gl_next = (i1_gl - 1 + iPCount) % iPCount;
-
-                        MPI_Irecv(dAlphaBetaX2 + i1_gl_next * iBufferABTileSize, iMaxTile1_Size << 1, MPI_DOUBLE,
-                                  iPrevRank, tag, MPI_COMM_WORLD, &recvRequest);
-                    }
-
-                    if (i2_gl == 0) {
+                    else {
                         for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABStartPos;
                              i1 <= iCurTile1_Size;
                              i1++, x1 += h1, pABInLinePos += 2) {
@@ -530,17 +503,12 @@ int main(int argc, char **argv )
 
                     // If i2_gl is not last tile, process sends bound values of coefficients alpha and beta
                     // to process iNextRank.
-                    // All processes send their data in nonblocking mode.
                     if (i2_gl != iPCount - 1) {
-                        MPI_Wait(&sendRequest, &status);
-                        MPI_Isend(pABLine, iCurTile1_Size << 1, MPI_DOUBLE,
-                                  iNextRank, tag, MPI_COMM_WORLD, &sendRequest);
+                        MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
                     }
                 }
             }
         }
-
-        MPI_Wait(&sendRequest, &status);
 
 
         ////////////////////////////////////////////////////////////////////////////////////
@@ -558,21 +526,14 @@ int main(int argc, char **argv )
 
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    if (i2_gl < iPCount - 1)
-                        MPI_Wait(&recvRequest, &status);
-
-                    if (i2_gl > 0) {
-                        pYNextStartPos = ( i1_gl == iPCount - 1 ) ? yCurrent : pYCurrentStartPos + iCurTile1_Size + 2;
-
-                        MPI_Irecv(pYNextStartPos + (iPLineCountX1[i2_gl - 1] + 1) * iX1_YLineSize + 1,
-                                  iMaxTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &recvRequest);
-                    }
-
                     pABLastLine = pABStartPos + iCurTile2_Size * (iCurTile1_Size << 1);
                     pYLastLine = pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize;
 
-                    if (i2_gl == iPCount - 1)
-                    {
+                    if (i2_gl != iPCount - 1) {
+                        MPI_Recv(pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize + 1,
+                                  iMaxTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &status);
+                    }
+                    else {
                         for (i1 = 0, x1 = pX1start[i1_gl], pABInLinePos = pABLastLine;
                              i1 < iCurTile1_Size;
                              i1++, x1 += h1, pABInLinePos += 2)
@@ -600,12 +561,11 @@ int main(int argc, char **argv )
                     }
 
                     // If i2_gl is not zero, process sends bound values of solution to process iPrevRank.
-                    // All processes send their data in nonblocking mode
+                    // All processes send their data in blocking mode
                     if (i2_gl != 0)
                     {
-                        MPI_Wait(&sendRequest, &status);
-                        MPI_Isend(pYCurrentLine + iX1_YLineSize, iCurTile1_Size, MPI_DOUBLE,
-                                  iPrevRank, tag, MPI_COMM_WORLD, &sendRequest);
+                        MPI_Send(pYCurrentLine + iX1_YLineSize, iCurTile1_Size, MPI_DOUBLE,
+                                  iPrevRank, tag, MPI_COMM_WORLD);
                     }
 
                     // Initialize boundary values at x1 = 0 and x1 = L1
@@ -626,8 +586,6 @@ int main(int argc, char **argv )
                 }
             }
         }
-
-        MPI_Wait(&sendRequest, &status);
         tag++;
     }
 
