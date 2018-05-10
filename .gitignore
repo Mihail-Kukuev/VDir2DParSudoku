@@ -1,0 +1,13 @@
+
+### CLion ###
+
+/.idea/
+
+# CMake
+cmake-build-debug/
+
+# IntelliJ
+*.iws
+*.iml
+*.ipr
+/out/
