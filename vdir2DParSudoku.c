@@ -181,9 +181,6 @@ int main(int argc, char **argv )
     double *pYCurrentCol = NULL;
     double *pYLastCol = NULL;
 
-    int iNextTile2_Size = 0;
-    int i1_gl_next = 0;
-
     int iMaxTile1_Size = iPLineCountX2[0];
     int iMaxTile2_Size = iPLineCountX1[0];
 
@@ -207,10 +204,10 @@ int main(int argc, char **argv )
          i1_gl < iPCount;
          i1_gl++, pYCurrentStartPos += iPLineCountX2[i1_gl] + 2)
     {
-        int x2index = (iMyRank - i1_gl + iPCount) % iPCount;
+        i2_gl = (iMyRank - i1_gl + iPCount) % iPCount;
 
-        for (i2 = 0, x2 = pX2start[x2index] - h2, pYCurrentLine = pYCurrentStartPos;
-             i2 <= iPLineCountX1[x2index] + 1;
+        for (i2 = 0, x2 = pX2start[i2_gl] - h2, pYCurrentLine = pYCurrentStartPos;
+             i2 <= iPLineCountX1[i2_gl] + 1;
              i2++, x2 += h2, pYCurrentLine += iX1_YLineSize)
         {
             for (i1 = 0, x1 = pX1start[i1_gl] - h1, p = pYCurrentLine;
@@ -263,8 +260,8 @@ int main(int argc, char **argv )
                         {
                         for (i2 = 1, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos;
                              i2 <= iCurTile2_Size;
-                             i2++, x2 += h2, pABInLinePos += 2) {
-
+                             i2++, x2 += h2, pABInLinePos += 2)
+                        {
                             dCoefA1_L = 0.5 * ( k2 ( 0.0, x2, tPrev ) + k2 ( 0.0, x2 - h2, tPrev ) );
                             dCoefA1_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev ) + k2 ( 0.0, x2, tPrev ) );
                             dCoefA2_L = 0.5 * ( k2 ( 0.0, x2, tPrev + tau ) + k2 ( 0.0, x2 - h2, tPrev + tau ) );
@@ -323,7 +320,8 @@ int main(int argc, char **argv )
 
                     // If i1_gl is not last tile, process sends bound values of coefficients alpha and beta
                     // to process iNextRank.
-                    if (i1_gl != iPCount - 1) {
+                    if (i1_gl != iPCount - 1)
+                    {
                         MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
                     }
 
@@ -402,20 +400,17 @@ int main(int argc, char **argv )
                         p = pYCurrentCol + 1;
                         for (i1 = 0, x1 = pX1start[i1_gl] - h1;
                              i1 <= iPLineCountX2[i1_gl] + 1;
-                             i1++, x1 += h1, p += 1) {
-                            if (i1_gl == 0) {
+                             i1++, x1 += h1, p += 1)
+                        {
+                            if (i1_gl == 0)
                                 p[0] = m3(x2, t);
-                            }
-                            else {
+                            else
                                 p[(iCurTile2_Size + 1) * iX1_YLineSize] = m4(x2, t);
-                            }
                         }
                     }
                 }
             }
         }
-
-        tag++;
 
         //--------------------------------------------------------//
         //   Calculate mesh function on j layer in direction x2   //
@@ -433,27 +428,27 @@ int main(int argc, char **argv )
         for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
         {
             iCurTile2_Size = iPLineCountX1[i2_gl];
-            pYPrevStartPos = yPrev + iX1_YLineSize + 1;
 
-            for (i1_gl = 0, pABStartPos = dAlphaBetaX2, pYPrevStartPos = yCurrent + iX1_YLineSize + 1;
+            for (i1_gl = 0, pABStartPos = dAlphaBetaX2, pYPrevStartPos = yPrev + iX1_YLineSize + 1;
                  i1_gl < iPCount;
                  i1_gl++, pABStartPos += iBufferABTileSize, pYPrevStartPos += iCurTile1_Size + 2)
             {
-                iCurTile1_Size = iPLineCountX2[i1_gl];
-
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
+                    iCurTile1_Size = iPLineCountX2[i1_gl];
+
                     // If i2_gl is not 0, process receives bound values of coefficients
                     // alpha and beta from process iPrevRank for current tile.
                     // If i2_gl is 0, processes calculates all coefficients alpha(i1,1) and beta(i1,1)
-
-                    if (i2_gl != 0) {
+                    if (i2_gl != 0)
+                    {
                         MPI_Recv(pABStartPos, iMaxTile1_Size << 1, MPI_DOUBLE, iPrevRank, tag, MPI_COMM_WORLD, &status);
                     }
                     else {
                         for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABStartPos;
                              i1 <= iCurTile1_Size;
-                             i1++, x1 += h1, pABInLinePos += 2) {
+                             i1++, x1 += h1, pABInLinePos += 2)
+                        {
                             kappa1 = 0.0;
                             eta1 = m3(x1, t);
                             pABInLinePos[0] = kappa1;
@@ -471,8 +466,8 @@ int main(int argc, char **argv )
                         x1start = pX1start[i1_gl];
 
                         dCoefA1_L = 0.5 * (k1(x1start, x2, tPrevSub) + k1(x1start - h1, x2, tPrevSub));
-                        for (i1 = 1, x1 = x1start, pABInLinePos = pABLine;
-                             i1 <= iCurTile1_Size;
+                        for (i1 = 0, x1 = x1start, pABInLinePos = pABLine;
+                             i1 < iCurTile1_Size;
                              i1++, x1 += h1, pABInLinePos += 2)
                         {
                             // Mesh node is fixed by current value of (x1,x2).
@@ -503,9 +498,8 @@ int main(int argc, char **argv )
 
                     // If i2_gl is not last tile, process sends bound values of coefficients alpha and beta
                     // to process iNextRank.
-                    if (i2_gl != iPCount - 1) {
+                    if (i2_gl != iPCount - 1)
                         MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
-                    }
                 }
             }
         }
@@ -522,16 +516,16 @@ int main(int argc, char **argv )
                  i1_gl < iPCount;
                  i1_gl++, pABStartPos += iBufferABTileSize, pYCurrentStartPos += iCurTile1_Size + 2)
             {
-                iCurTile1_Size = iPLineCountX2[i1_gl];
-
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
+                    iCurTile1_Size = iPLineCountX2[i1_gl];
+
                     pABLastLine = pABStartPos + iCurTile2_Size * (iCurTile1_Size << 1);
                     pYLastLine = pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize;
 
-                    if (i2_gl != iPCount - 1) {
-                        MPI_Recv(pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize + 1,
-                                  iMaxTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &status);
+                    if (i2_gl != iPCount - 1)
+                    {
+                        MPI_Recv(pYLastLine, iMaxTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &status);
                     }
                     else {
                         for (i1 = 0, x1 = pX1start[i1_gl], pABInLinePos = pABLastLine;
@@ -546,8 +540,7 @@ int main(int argc, char **argv )
 
                     // Calculate solution in current tile.
                     // Scan lines of tile (the line is a set of tile nodes with fixed i2)
-                    for (i2 = iCurTile2_Size, pABLine = pABLastLine,
-                         pYCurrentLine = pYLastLine;
+                    for (i2 = iCurTile2_Size, pABLine = pABLastLine, pYCurrentLine = pYLastLine;
                          i2 >= 0;
                          i2--, pABLine -= iCurTile1_Size << 1, pYCurrentLine -= iX1_YLineSize)
                     {
@@ -561,7 +554,6 @@ int main(int argc, char **argv )
                     }
 
                     // If i2_gl is not zero, process sends bound values of solution to process iPrevRank.
-                    // All processes send their data in blocking mode
                     if (i2_gl != 0)
                     {
                         MPI_Send(pYCurrentLine + iX1_YLineSize, iCurTile1_Size, MPI_DOUBLE,
@@ -573,14 +565,13 @@ int main(int argc, char **argv )
                     {
                         p = yCurrent;
                         for (i2 = 0, x2 = pX2start[i2_gl] - h2;
-                             i2 <= iPLineCountX1[i2_gl] + 1;
-                             i2++, x2 += h2, p += iX1_YLineSize) {
-                            if (i1_gl == 0) {
+                             i2 <= iCurTile2_Size + 1;
+                             i2++, x2 += h2, p += iX1_YLineSize)
+                        {
+                            if (i1_gl == 0)
                                 p[0] = m1(x2, t);
-                            }
-                            else {
+                            else
                                 p[iX1_YLineSize - 1] = m2(x2, t);
-                            }
                         }
                     }
                 }
@@ -596,8 +587,9 @@ int main(int argc, char **argv )
 
     // Gather mesh solution onto zero process
 
-    if ( iMyRank == 0 ) {
-        dY = (double *) calloc(iX1_YLineSize * (n2 + 1), sizeof(double));
+    if ( iMyRank == 0 )
+    {
+        dY = (double *) calloc((n1 + 1) * (n2 + 1), sizeof(double));
     }
     p = dY;
 
@@ -605,7 +597,7 @@ int main(int argc, char **argv )
     int iLinesCount, iLineSize;
     for (i2_gl = 0, dYStartPos = dY;
          i2_gl < iPCount;
-         i2_gl++, dYStartPos += iLinesCount * iX1_YLineSize)
+         i2_gl++, dYStartPos += iLinesCount * (n1 + 1))
     {
         iLinesCount = iPLineCountX1[i2_gl];
         if ( i2_gl == iPCount - 1 || i2_gl == 0 )
@@ -616,24 +608,30 @@ int main(int argc, char **argv )
              i1_gl++, pYCurrentStartPos += iPLineCountX2[i1_gl] + 2, p += iLineSize)
         {
             iLineSize = iPLineCountX2[i1_gl];
-            int iCurProc = (i1_gl + i2_gl) % iPCount;
+            if ( i1_gl == iPCount - 1 || i1_gl == 0 )
+                iLineSize++;
 
             MPI_Datatype blocktype;
-            MPI_Type_vector( iLinesCount, iLineSize, iX1_YLineSize, MPI_DOUBLE, &blocktype);
+            MPI_Type_vector(iLinesCount, iLineSize, iX1_YLineSize, MPI_DOUBLE, &blocktype);
             MPI_Type_commit(&blocktype);
+
+            double* pYCurrentSendStartPos = pYCurrentStartPos;
+            if (i2_gl != 0)
+                pYCurrentSendStartPos += iX1_YLineSize;
+            if (i1_gl != 0)
+                pYCurrentSendStartPos++;
+
+            int iCurProc = (i1_gl + i2_gl) % iPCount;
 
             //send-receive iLinesCount of lines-solutions with length = iLineLength, placed with offset = iX1_YLineSize
             if (iMyRank == iCurProc)
             {
-                if (i2_gl != 0)
-                    MPI_Send(pYCurrentStartPos + iX1_YLineSize, 1, blocktype, 0, MPI_ANY_TAG, MPI_COMM_WORLD);
-                else
-                    MPI_Send(pYCurrentStartPos, 1, blocktype, 0, MPI_ANY_TAG, MPI_COMM_WORLD);
+                MPI_Send(pYCurrentSendStartPos, 1, blocktype, 0, MPI_ANY_TAG, MPI_COMM_WORLD);
             }
 
             if ( iMyRank == 0 )
             {
-                MPI_Recv ( p, 1, blocktype, iCurProc, MPI_ANY_TAG, MPI_COMM_WORLD, &status );
+                MPI_Recv (p, 1, blocktype, iCurProc, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
             }
         }
     }
@@ -645,9 +643,9 @@ int main(int argc, char **argv )
     {
         F = fopen ( "res.parSudoku", "w" );
         p = dY;
-        for ( i2 = 0, x2 = 0.0;  i2 <= n2;  i2++, x2 += h2 )
+        for ( i2 = 0;  i2 <= n2;  i2++ )
         {
-            for ( i1 = 0, x1 = 0.0;  i1 <= n1;  i1++, x1 += h1, p++ )  fprintf ( F, "%e ", *p );
+            for ( i1 = 0;  i1 <= n1;  i1++, p++ )  fprintf ( F, "%e ", *p );
             fprintf ( F, "\n" );
         }
 
@@ -684,6 +682,9 @@ int main(int argc, char **argv )
     if ( yPrev != NULL ) free ( yPrev );
     if ( dAlphaBetaX2 != NULL ) free ( dAlphaBetaX2 );
     if ( iPLineCountX1 != NULL ) free ( iPLineCountX1 );
+    if ( iPLineCountX2 != NULL ) free ( iPLineCountX2 );
+    if ( pX1start != NULL ) free ( pX1start );
+    if ( pX2start != NULL ) free ( pX2start );
     if ( FL != NULL ) fclose ( FL );
 
     MPI_Finalize ();
@@ -691,7 +692,8 @@ int main(int argc, char **argv )
     return 0;
 }
 
-void swap_pointers(double** yCurrent, double** yPrev) {
+void swap_pointers(double** yCurrent, double** yPrev)
+{
     double* p = *yPrev;
     *yPrev = *yCurrent;
     *yCurrent = p;
