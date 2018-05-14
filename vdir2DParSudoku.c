@@ -7,6 +7,8 @@
 
 #define MAX(a,b) ((a)>(b)?(a):(b))
 
+//#define WITH_PROCESS_LOG
+
 void swap_pointers_d(double** a, double** b);
 
 void swap_pointers(double*** a, double*** b);
@@ -105,7 +107,7 @@ int main(int argc, char **argv )
     if ( iMyRank == 0 )
     {
         printf ( "\nSolving the heat equation by variable directions method\n" );
-        printf ( "Parallel mode, version 2.2b\n" );
+        printf ( "Parallel mode, version 1.0\n" );
         printf ( "Process count: %d\n", iPCount );
     }
 
@@ -191,10 +193,9 @@ int main(int argc, char **argv )
     iYBufferSize = ( iMaxTile2_Size + 2 ) * iX1_YLineSize;
     yCurrent = ( double* ) calloc ( iYBufferSize, sizeof ( double ) );
     yPrev = ( double* ) calloc ( iYBufferSize, sizeof ( double ) );
-    dAlphaBeta = ( double* ) calloc ( MAX( 2 * ( n1 - 1 ) * ( iMaxTile2_Size + 1 ),
-                                             2 * ( n2 - 1 ) * ( iMaxTile1_Size + 1 ) ),
-                                        sizeof ( double ) );
-    iBufferABTileSize = 2 * (iMaxTile2_Size + 1) * (iMaxTile1_Size + 1);
+
+    iBufferABTileSize = 2 * (iMaxTile1_Size + 1) * (iMaxTile2_Size + 1);
+    dAlphaBeta = ( double* ) calloc ( iBufferABTileSize * iPCount, sizeof ( double ) );
 
 
     // Initialization of mesh function on 0-layer
@@ -244,7 +245,7 @@ int main(int argc, char **argv )
         swap_pointers(&pYCurTileStart, &pYPrevTileStart);
         memset ( yCurrent, 0, iYBufferSize * sizeof ( double ) );
 
-        for (i1_gl = 0, pABStartPos = dAlphaBeta, pYPrevStartPos = yPrev;
+        for (i1_gl = 0, pABStartPos = dAlphaBeta, pYPrevStartPos = yPrev + iX1_YLineSize;
              i1_gl < iPCount;
              i1_gl++, pABStartPos += iBufferABTileSize, pYPrevStartPos += iCurTile1_Size + 2 )
         {
@@ -257,7 +258,7 @@ int main(int argc, char **argv )
                     iCurTile2_Size = iPLineCountX1[i2_gl];
 
                     MPI_Datatype twoColsType;
-                    MPI_Type_vector( iCurTile2_Size, 2, iCurTile1_Size << 1, MPI_DOUBLE, &twoColsType);
+                    MPI_Type_vector( iCurTile2_Size, 2, (iCurTile1_Size + 1) << 1, MPI_DOUBLE, &twoColsType);
                     MPI_Type_commit(&twoColsType);
 
                     if (i1_gl != 0)
@@ -270,7 +271,7 @@ int main(int argc, char **argv )
                         // Process calculates all coefficients alpha(1,i2) and beta(1,i2)
                         for (i2 = 1, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos;
                              i2 <= iCurTile2_Size;
-                             i2++, x2 += h2, pABInLinePos += (iCurTile1_Size << 1))
+                             i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
                         {
                             dCoefA1_L = 0.5 * ( k2 ( 0.0, x2, tPrev ) + k2 ( 0.0, x2 - h2, tPrev ) );
                             dCoefA1_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev ) + k2 ( 0.0, x2, tPrev ) );
@@ -291,7 +292,7 @@ int main(int argc, char **argv )
                     // Calculate coefficients alpha[] and beta[] in current tile
                     for (i2 = 1, x2 = pX2start[i2_gl], pABLine = pABStartPos, pYPrevLine = pYPrevStartPos;
                          i2 <= iCurTile2_Size;
-                         i2++, x2 += h2, pABLine += iCurTile1_Size << 1, pYPrevLine += iX1_YLineSize)
+                         i2++, x2 += h2, pABLine += (iCurTile1_Size + 1) << 1, pYPrevLine += iX1_YLineSize)
                     {
                         // Scan nodes in line of tile and consiquently calculate coefficients alpha and beta
                         // associated with nodes
@@ -330,10 +331,9 @@ int main(int argc, char **argv )
                     if (i1_gl != iPCount - 1)
                     {
                         // Process sends bound values of coefficients alpha and beta to next process
-                        MPI_Send(pABStartPos + (iCurTile1_Size << 1) - 2, 1, twoColsType,
+                        MPI_Send(pABStartPos + (iCurTile1_Size << 1), 1, twoColsType,
                                  iNextRank, tag, MPI_COMM_WORLD);
                     }
-
                 }
             }
         }
@@ -343,7 +343,7 @@ int main(int argc, char **argv )
 
         for (i1_gl = iPCount - 1,
                 pABStartPos = dAlphaBeta + iBufferABTileSize * (iPCount - 1),
-                pYCurrentStartPos = pYCurTileStart[i1_gl];
+                pYCurrentStartPos = pYCurTileStart[i1_gl] + iX1_YLineSize;
              i1_gl >= 0;
              i1_gl--, pABStartPos -= iBufferABTileSize, pYCurrentStartPos -= iCurTile1_Size + 2 )
         {
@@ -359,16 +359,16 @@ int main(int argc, char **argv )
                     MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
                     MPI_Type_commit(&coltype);
 
+                    double* pYLastCol = pYCurrentStartPos + iCurTile1_Size + 1;
+
                     if (i1_gl != iPCount - 1)
                     {
-                        MPI_Recv(pYCurrentStartPos + iCurTile1_Size + 1, 1, coltype, iNextRank, tag, MPI_COMM_WORLD, &status );
+                        MPI_Recv(pYLastCol, 1, coltype, iNextRank, tag, MPI_COMM_WORLD, &status );
                     }
                     else {
-                        double* pYLastCol = pYCurrentStartPos + iCurTile1_Size + 1;
-
-                        for (i2 = 0, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos + (iCurTile1_Size << 1) - 2;
+                        for (i2 = 0, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos + (iCurTile1_Size << 1);
                              i2 < iCurTile2_Size;
-                             i2++, x2 += h2, pABInLinePos += iCurTile1_Size << 1)
+                             i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
                         {
                             dCoefA1_L = 0.5 * ( k2 ( L1, x2, tPrev ) + k2 ( L1, x2 - h2, tPrev ) );
                             dCoefA1_R = 0.5 * ( k2 ( L1, x2 + h2, tPrev ) + k2 ( L1, x2, tPrev ) );
@@ -387,9 +387,9 @@ int main(int argc, char **argv )
 
                     // Calculate solution in current tile.
                     // Scan lines of tile (line is a set of tile nodes with fixed i2)
-                    for (i2 = 0, pABLine = pABStartPos + (iCurTile1_Size << 1) - 2, pYCurrentLine = pYCurrentStartPos;
+                    for (i2 = 0, pABLine = pABStartPos + (iCurTile1_Size << 1), pYCurrentLine = pYCurrentStartPos;
                          i2 < iCurTile2_Size;
-                         i2++, pABLine += iCurTile1_Size << 1, pYCurrentLine += iX1_YLineSize)
+                         i2++, pABLine += (iCurTile1_Size + 1) << 1, pYCurrentLine += iX1_YLineSize)
                     {
                         // Scan nodes in line and consiquently calculate solution associated with nodes
                         for (i1 = iCurTile1_Size + 1, pABInLinePos = pABLine;
@@ -517,7 +517,6 @@ int main(int argc, char **argv )
             }
         }
 
-
         ////////////////////////////////////////////////////////////////////////////////////
         // Second (reverse) stage of progonka - calculation of solution.
 
@@ -604,8 +603,8 @@ int main(int argc, char **argv )
     {
         dY = (double *) calloc((n1 + 1) * (n2 + 1), sizeof(double));
     }
-    p = dY;
 
+    MPI_Request recvReq;
     double *dYStartPos;
     int iLinesCount, iLineSize;
     for (i2_gl = 0, dYStartPos = dY;
@@ -624,10 +623,6 @@ int main(int argc, char **argv )
             if ( i1_gl == iPCount - 1 || i1_gl == 0 )
                 iLineSize++;
 
-            MPI_Datatype blocktype;
-            MPI_Type_vector(iLinesCount, iLineSize, iX1_YLineSize, MPI_DOUBLE, &blocktype);
-            MPI_Type_commit(&blocktype);
-
             double* pYCurrentSendStartPos = pYCurrentStartPos;
             if (i2_gl != 0)
                 pYCurrentSendStartPos += iX1_YLineSize;
@@ -637,15 +632,24 @@ int main(int argc, char **argv )
             int iCurProc = (i1_gl + i2_gl) % iPCount;
 
             //send-receive iLinesCount of lines-solutions with length = iLineLength, placed with offset = iX1_YLineSize
-            if (iMyRank == iCurProc)
-            {
-                MPI_Send(pYCurrentSendStartPos, 1, blocktype, 0, MPI_ANY_TAG, MPI_COMM_WORLD);
-            }
-
             if ( iMyRank == 0 )
             {
-                MPI_Recv (p, 1, blocktype, iCurProc, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+                MPI_Datatype blocktype;
+                MPI_Type_vector(iLinesCount, iLineSize, n1 + 1, MPI_DOUBLE, &blocktype);
+                MPI_Type_commit(&blocktype);
+                MPI_Irecv(p, 1, blocktype, iCurProc, tag, MPI_COMM_WORLD, &recvReq);
             }
+
+            if (iMyRank == iCurProc)
+            {
+                MPI_Datatype blocktype;
+                MPI_Type_vector(iLinesCount, iLineSize, iX1_YLineSize, MPI_DOUBLE, &blocktype);
+                MPI_Type_commit(&blocktype);
+                MPI_Send(pYCurrentSendStartPos, 1, blocktype, 0, tag, MPI_COMM_WORLD);
+            }
+
+            if (iMyRank == 0)
+                MPI_Wait(&recvReq, &status);
         }
     }
 
@@ -691,10 +695,10 @@ int main(int argc, char **argv )
 
 
     if ( dY != NULL ) free ( dY );
-    if ( yCurrent != NULL ) free ( yCurrent );
-    if ( yPrev != NULL ) free ( yPrev );
     if ( pYCurTileStart != NULL ) free ( pYCurTileStart );
     if ( pYPrevTileStart != NULL ) free ( pYPrevTileStart );
+    if ( yCurrent != NULL ) free ( yCurrent );
+    if ( yPrev != NULL ) free ( yPrev );
     if ( dAlphaBeta != NULL ) free ( dAlphaBeta );
     if ( iPLineCountX1 != NULL ) free ( iPLineCountX1 );
     if ( iPLineCountX2 != NULL ) free ( iPLineCountX2 );
