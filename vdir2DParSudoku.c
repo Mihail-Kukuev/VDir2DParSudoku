@@ -162,17 +162,21 @@ int main(int argc, char **argv )
     for ( i = 0, x1start = h1, x2start = h2; i < iPCount; i++ )
     {
         pX1start[i] = x1start;
-        pX2start[i] = x2start;
-        for ( j = 0; j < iPLineCountX1[i]; j++ )
+        for (j = 0; j < iPLineCountX2[i]; j++)
         {
             x1start += h1;
+        }
+        pX2start[i] = x2start;
+        for (j = 0; j < iPLineCountX1[i]; j++)
+        {
             x2start += h2;
         }
     }
 
 
 #ifdef WITH_PROCESS_LOG
-    fprintf ( FL, "Count of processed mesh lines in direction x1: %d \n", iPLineCountX1[iMyRank] );
+    fprintf ( FL, "Count of processed mesh lines: %d (x1), %d (x2)\n",
+              iPLineCountX1[iMyRank], iPLineCountX2[iMyRank] );
 #endif
 
     int i1_gl, i2_gl;
@@ -198,33 +202,37 @@ int main(int argc, char **argv )
     dAlphaBeta = ( double* ) calloc ( iBufferABTileSize * iPCount, sizeof ( double ) );
 
 
-    // Initialization of mesh function on 0-layer
-    for (i1_gl = 0, pYCurrentStartPos = yCurrent;
-         i1_gl < iPCount;
-         i1_gl++, pYCurrentStartPos += iPLineCountX2[i1_gl] + 2)
-    {
-        i2_gl = (iMyRank - i1_gl + iPCount) % iPCount;
-
-        for (i2 = 0, x2 = pX2start[i2_gl] - h2, pYCurrentLine = pYCurrentStartPos;
-             i2 <= iPLineCountX1[i2_gl] + 1;
-             i2++, x2 += h2, pYCurrentLine += iX1_YLineSize)
-        {
-            for (i1 = 0, x1 = pX1start[i1_gl] - h1, p = pYCurrentLine;
-                 i1 <= iPLineCountX2[i1_gl] + 1;
-                 i1++, x1 += h1, p++)
-            {
-                *p = u(x1, x2, 0.0);
-            }
-        }
-    }
-
     // Pointers to start position of solution in tile
     double** pYCurTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
     double** pYPrevTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
     for ( i = 0; i < iPCount; i++ )
     {
-        pYCurTileStart[i] = (i != 0) ? pYCurTileStart[i - 1] + iPLineCountX2[i - 1] : yCurrent;
-        pYPrevTileStart[i] = (i != 0) ? pYPrevTileStart[i - 1] + iPLineCountX2[i - 1] : yPrev;
+        pYCurTileStart[i] = (i != 0) ? pYCurTileStart[i - 1] + iPLineCountX2[i - 1] + 2: yCurrent;
+        pYPrevTileStart[i] = (i != 0) ? pYPrevTileStart[i - 1] + iPLineCountX2[i - 1] + 2: yPrev;
+    }
+
+
+    // Initialization mesh function on 0-layer and save it as yPrev array
+    for (i1_gl = 0; i1_gl < iPCount; i1_gl++)
+    {
+        pYCurrentStartPos = pYCurTileStart[i1_gl];
+        for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
+        {
+            if (iMyRank == (i1_gl + i2_gl) % iPCount)
+            {
+                for (i2 = 0, x2 = pX2start[i2_gl] - h2, pYCurrentLine = pYCurrentStartPos;
+                     i2 <= iPLineCountX1[i2_gl] + 1;
+                     i2++, x2 += h2, pYCurrentLine += iX1_YLineSize)
+                {
+                    for (i1 = 0, x1 = pX1start[i1_gl] - h1;
+                         i1 <= iPLineCountX2[i1_gl] + 1;
+                         i1++, x1 += h1, p++)
+                    {
+                        pYCurrentLine[i1] = u(x1, x2, 0.0);
+                    }
+                }
+            }
+        }
     }
 
 
@@ -245,18 +253,19 @@ int main(int argc, char **argv )
         swap_pointers(&pYCurTileStart, &pYPrevTileStart);
         memset ( yCurrent, 0, iYBufferSize * sizeof ( double ) );
 
-        for (i1_gl = 0, pABStartPos = dAlphaBeta, pYPrevStartPos = yPrev + iX1_YLineSize;
+        for (i1_gl = 0, pABStartPos = dAlphaBeta;
              i1_gl < iPCount;
-             i1_gl++, pABStartPos += iBufferABTileSize, pYPrevStartPos += iCurTile1_Size + 2 )
+             i1_gl++, pABStartPos += iBufferABTileSize)
         {
+            pYPrevStartPos = pYPrevTileStart[i1_gl] + iX1_YLineSize;
             iCurTile1_Size = iPLineCountX2[i1_gl];
 
             for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
             {
+                iCurTile2_Size = iPLineCountX1[i2_gl];
+
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    iCurTile2_Size = iPLineCountX1[i2_gl];
-
                     MPI_Datatype twoColsType;
                     MPI_Type_vector( iCurTile2_Size, 2, (iCurTile1_Size + 1) << 1, MPI_DOUBLE, &twoColsType);
                     MPI_Type_commit(&twoColsType);
@@ -341,20 +350,19 @@ int main(int argc, char **argv )
         ////////////////////////////////////////////////////////////////////////////////////
         // Second (reverse) stage of progonka - calculation of solution.
 
-        for (i1_gl = iPCount - 1,
-                pABStartPos = dAlphaBeta + iBufferABTileSize * (iPCount - 1),
-                pYCurrentStartPos = pYCurTileStart[i1_gl] + iX1_YLineSize;
+        for (i1_gl = iPCount - 1, pABStartPos = dAlphaBeta + iBufferABTileSize * (iPCount - 1);
              i1_gl >= 0;
-             i1_gl--, pABStartPos -= iBufferABTileSize, pYCurrentStartPos -= iCurTile1_Size + 2 )
+             i1_gl--, pABStartPos -= iBufferABTileSize)
         {
+            pYCurrentStartPos = pYCurTileStart[i1_gl] + iX1_YLineSize;
             iCurTile1_Size = iPLineCountX2[i1_gl];
 
             for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
             {
+                iCurTile2_Size = iPLineCountX1[i2_gl];
+
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    iCurTile2_Size = iPLineCountX1[i2_gl];
-
                     MPI_Datatype coltype;
                     MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
                     MPI_Type_commit(&coltype);
@@ -403,22 +411,7 @@ int main(int argc, char **argv )
                     // Process sends bound values of solution to previous process.
                     if (i1_gl != 0)
                     {
-                        MPI_Send(pYCurrentStartPos, 1, coltype, iPrevRank, tag, MPI_COMM_WORLD);
-                    }
-
-                    // Initialize boundary values at x2 = 0 and x2 = L2
-                    if (i2_gl == 0 || i2_gl == iPCount - 1)
-                    {
-                        p = pYCurrentStartPos;
-                        for (i1 = 0, x1 = pX1start[i1_gl] - h1;
-                             i1 <= iCurTile1_Size + 1;
-                             i1++, x1 += h1, p++)
-                        {
-                            if (i2_gl == 0)
-                                p[0] = m3(x1, t);
-                            else
-                                p[(iCurTile2_Size + 1) * iX1_YLineSize] = m4(x1, t);
-                        }
+                        MPI_Send(pYCurrentStartPos + 1, 1, coltype, iPrevRank, tag, MPI_COMM_WORLD);
                     }
                 }
             }
@@ -446,10 +439,10 @@ int main(int argc, char **argv )
                  i1_gl < iPCount;
                  i1_gl++, pABStartPos += iBufferABTileSize, pYPrevStartPos += iCurTile1_Size + 2)
             {
+                iCurTile1_Size = iPLineCountX2[i1_gl];
+
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    iCurTile1_Size = iPLineCountX2[i1_gl];
-
                     if (i2_gl != 0)
                     {
                         // Process receives bound values of coefficients alpha and beta from previous process.
@@ -528,10 +521,10 @@ int main(int argc, char **argv )
                  i1_gl < iPCount;
                  i1_gl++, pABStartPos += iBufferABTileSize, pYCurrentStartPos += iCurTile1_Size + 2)
             {
+                iCurTile1_Size = iPLineCountX2[i1_gl];
+
                 if (iMyRank == (i1_gl + i2_gl) % iPCount)
                 {
-                    iCurTile1_Size = iPLineCountX2[i1_gl];
-
                     pABLastLine = pABStartPos + iCurTile2_Size * (iCurTile1_Size << 1);
                     pYLastLine = pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize;
 
@@ -596,7 +589,6 @@ int main(int argc, char **argv )
     cp2 = clock ();
     time2 = MPI_Wtime ();
 
-
     // Gather mesh solution onto zero process
 
     if ( iMyRank == 0 )
@@ -617,9 +609,10 @@ int main(int argc, char **argv )
 
         for (i1_gl = 0, pYCurrentStartPos = yCurrent, p = dYStartPos;
              i1_gl < iPCount;
-             i1_gl++, pYCurrentStartPos += iPLineCountX2[i1_gl] + 2, p += iLineSize)
+             i1_gl++, pYCurrentStartPos += iCurTile1_Size + 2, p += iLineSize)
         {
-            iLineSize = iPLineCountX2[i1_gl];
+            iCurTile1_Size = iPLineCountX2[i1_gl];
+            iLineSize = iCurTile1_Size;
             if ( i1_gl == iPCount - 1 || i1_gl == 0 )
                 iLineSize++;
 
