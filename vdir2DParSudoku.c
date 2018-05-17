@@ -13,7 +13,7 @@ void swap_pointers_d(double** a, double** b);
 
 void swap_pointers(double*** a, double*** b);
 
-/* Example of processes grid:
+/* Example of 4 processes grid:
  * x2 axis
  * ^________________
  * | 3 | 0 | 1 | 2 |
@@ -24,7 +24,7 @@ void swap_pointers(double*** a, double*** b);
 
 int main(int argc, char **argv )
 {
-    int i, i1, i2, j;
+    int i, i1, i2, j, i1_gl, i2_gl;
     int n1 = 0;
     int n2 = 0;
     int j0 = 0;
@@ -41,11 +41,11 @@ int main(int argc, char **argv )
     double x2;
     double x1start = 0.0;
     double x2start = 0.0;
-    double *pX1start = NULL;
-    double *pX2start = NULL;
     double t;
     double tPrev;
     double tPrevSub = 0.0;
+    double *pX1start = NULL;
+    double *pX2start = NULL;
 
     double dAValue = 0.0;
     double dBValue = 0.0;
@@ -74,6 +74,8 @@ int main(int argc, char **argv )
     double *pYPrevLine = NULL;
     double *pYCurrentStartPos = NULL;
     double *pYCurrentLine = NULL;
+    double *pYLastLine = NULL;
+    double* pYLastCol = NULL;
     double *p = NULL;
     int iYBufferSize = 0;
     double eps = 0.0;
@@ -84,9 +86,12 @@ int main(int argc, char **argv )
     int iPrevRank = 0;
     int iNextRank = 0;
     char cStr[10];
-    int *iPLineCountX1 = NULL; // Distribution of mesh line counts per processes to find solution
+    int iCurTile1_Size = 0;
+    int iCurTile2_Size = 0;
+    int iBufferABTileSize = 0;
+    int *iTile2_Size = NULL; // Distribution of mesh line counts per processes to find solution
     // in direction x1. Mesh line fixed by value of coordinate i2.
-    int *iPLineCountX2 = NULL; // Distribution of mesh line counts per processes to find solution in direction x2
+    int *iTile1_Size = NULL; // Distribution of mesh line counts per processes to find solution in direction x2
     // Mesh line fixed by value of coordinate i1.
     int tag = 0;
     MPI_Status status;
@@ -147,13 +152,14 @@ int main(int argc, char **argv )
 #endif
 
 
-    // Calculate the count of mesh lines for each process in both direction x1 and x2
-    iPLineCountX1 = ( int* ) calloc ( iPCount, sizeof ( int ) );
-    iPLineCountX2 = ( int* ) calloc ( iPCount, sizeof ( int ) );
+    // Calculate the count of mesh lines for each process in both direction x1 and x2.
+    // Tile size is count of such mesh lines without lines with boundary values.
+    iTile2_Size = ( int* ) calloc ( iPCount, sizeof ( int ) );
+    iTile1_Size = ( int* ) calloc ( iPCount, sizeof ( int ) );
     for ( i = 0; i < iPCount; i++ )
     {
-        iPLineCountX1[i] = ( n2 - 1 ) / iPCount + ( i < ( n2 - 1 ) % iPCount );
-        iPLineCountX2[i] = ( n1 - 1 ) / iPCount + ( i < ( n1 - 1 ) % iPCount );
+        iTile2_Size[i] = ( n2 - 1 ) / iPCount + ( i < ( n2 - 1 ) % iPCount );
+        iTile1_Size[i] = ( n1 - 1 ) / iPCount + ( i < ( n1 - 1 ) % iPCount );
     }
 
     // Calculate start values of variables x1 and x2 for each block in "sudoku" grid, and start positions of solutions
@@ -162,36 +168,25 @@ int main(int argc, char **argv )
     for ( i = 0, x1start = h1, x2start = h2; i < iPCount; i++ )
     {
         pX1start[i] = x1start;
-        for (j = 0; j < iPLineCountX2[i]; j++)
-        {
+        for (j = 0; j < iTile1_Size[i]; j++)
             x1start += h1;
-        }
         pX2start[i] = x2start;
-        for (j = 0; j < iPLineCountX1[i]; j++)
-        {
+        for (j = 0; j < iTile2_Size[i]; j++)
             x2start += h2;
-        }
     }
 
 
 #ifdef WITH_PROCESS_LOG
     fprintf ( FL, "Count of processed mesh lines: %d (x1), %d (x2)\n",
-              iPLineCountX1[iMyRank], iPLineCountX2[iMyRank] );
+              iTile2_Size[iMyRank], iTile1_Size[iMyRank] );
 #endif
 
-    int i1_gl, i2_gl;
-    int iCurTile1_Size = 0;
-    int iCurTile2_Size = 0;
-    int iBufferABTileSize = 0;
-    double *pYLastLine = NULL;
-
-    int iMaxTile1_Size = iPLineCountX2[0];
-    int iMaxTile2_Size = iPLineCountX1[0];
-
-    // For each tile we should have a column to receive solutions from previous process in reverse stage.
-    // For comfort we have column on each boundary of tile,
-    // but both of them will be used only for first tile in X1 direction.
+    // For each tile we should have 2 extra columns of solutions, one from previous tile and one from next.
+    // They also will be used for boundary values.
     int iX1_YLineSize = n1 - 1 + 2 * iPCount;
+
+    int iMaxTile1_Size = iTile1_Size[0];
+    int iMaxTile2_Size = iTile2_Size[0];
 
     // Memory allocation to store mesh data and coefficients of linear equations
     iYBufferSize = ( iMaxTile2_Size + 2 ) * iX1_YLineSize;
@@ -203,34 +198,44 @@ int main(int argc, char **argv )
 
 
     // Pointers to start position of solution in tile
-    double** pYCurTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
-    double** pYPrevTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
+    double** pCurYTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
+    double** pPrevYTileStart = ( double** ) calloc ( iPCount, sizeof ( double* ) );
     for ( i = 0; i < iPCount; i++ )
     {
-        pYCurTileStart[i] = (i != 0) ? pYCurTileStart[i - 1] + iPLineCountX2[i - 1] + 2: yCurrent;
-        pYPrevTileStart[i] = (i != 0) ? pYPrevTileStart[i - 1] + iPLineCountX2[i - 1] + 2: yPrev;
+        pCurYTileStart[i] = (i != 0) ? pCurYTileStart[i - 1] + iTile1_Size[i - 1] + 2: yCurrent;
+        pPrevYTileStart[i] = (i != 0) ? pPrevYTileStart[i - 1] + iTile1_Size[i - 1] + 2: yPrev;
+    }
+
+    // Custom types for sending/receiving coefficients and Y values
+    MPI_Datatype *AB_COLUMN_TYPE = ( MPI_Datatype* ) malloc ( iPCount * sizeof ( MPI_Datatype ) );
+    MPI_Datatype *Y_COLUMN_TYPE = ( MPI_Datatype* ) malloc ( iPCount * sizeof ( MPI_Datatype ) );
+    for ( i1_gl = 0; i1_gl < iPCount; i1_gl++ )
+    {
+        i2_gl = (iMyRank + iPCount - i1_gl) % iPCount;
+
+        MPI_Type_vector(iTile2_Size[i2_gl], 2, (iTile1_Size[i1_gl] + 1) << 1, MPI_DOUBLE, AB_COLUMN_TYPE + i1_gl);
+        MPI_Type_commit(AB_COLUMN_TYPE + i1_gl);
+
+        MPI_Type_vector(iTile2_Size[i2_gl], 1, iX1_YLineSize, MPI_DOUBLE, &Y_COLUMN_TYPE[i1_gl]);
+        MPI_Type_commit(&Y_COLUMN_TYPE[i1_gl]);
     }
 
 
     // Initialization mesh function on 0-layer and save it as yPrev array
     for (i1_gl = 0; i1_gl < iPCount; i1_gl++)
     {
-        pYCurrentStartPos = pYCurTileStart[i1_gl];
-        for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
+        pYCurrentStartPos = pCurYTileStart[i1_gl];
+        i2_gl = (iMyRank + iPCount - i1_gl) % iPCount;
+
+        for (i2 = 0, x2 = pX2start[i2_gl] - h2, pYCurrentLine = pYCurrentStartPos;
+             i2 <= iTile2_Size[i2_gl] + 1;
+             i2++, x2 += h2, pYCurrentLine += iX1_YLineSize)
         {
-            if (iMyRank == (i1_gl + i2_gl) % iPCount)
+            for (i1 = 0, x1 = pX1start[i1_gl] - h1;
+                 i1 <= iTile1_Size[i1_gl] + 1;
+                 i1++, x1 += h1, p++)
             {
-                for (i2 = 0, x2 = pX2start[i2_gl] - h2, pYCurrentLine = pYCurrentStartPos;
-                     i2 <= iPLineCountX1[i2_gl] + 1;
-                     i2++, x2 += h2, pYCurrentLine += iX1_YLineSize)
-                {
-                    for (i1 = 0, x1 = pX1start[i1_gl] - h1;
-                         i1 <= iPLineCountX2[i1_gl] + 1;
-                         i1++, x1 += h1, p++)
-                    {
-                        pYCurrentLine[i1] = u(x1, x2, 0.0);
-                    }
-                }
+                pYCurrentLine[i1] = u(x1, x2, 0.0);
             }
         }
     }
@@ -250,100 +255,90 @@ int main(int argc, char **argv )
         t = tPrev + tau / 2;
 
         swap_pointers_d(&yCurrent, &yPrev);
-        swap_pointers(&pYCurTileStart, &pYPrevTileStart);
+        swap_pointers(&pCurYTileStart, &pPrevYTileStart);
         memset ( yCurrent, 0, iYBufferSize * sizeof ( double ) );
 
         for (i1_gl = 0, pABStartPos = dAlphaBeta;
              i1_gl < iPCount;
              i1_gl++, pABStartPos += iBufferABTileSize)
         {
-            pYPrevStartPos = pYPrevTileStart[i1_gl] + iX1_YLineSize;
-            iCurTile1_Size = iPLineCountX2[i1_gl];
+            iCurTile1_Size = iTile1_Size[i1_gl];
+            pYPrevStartPos = pPrevYTileStart[i1_gl] + iX1_YLineSize;
 
-            for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
+            i2_gl = (iMyRank + iPCount - i1_gl) % iPCount;
+            iCurTile2_Size = iTile2_Size[i2_gl];
+
+            if (i1_gl != 0)
             {
-                iCurTile2_Size = iPLineCountX1[i2_gl];
-
-                if (iMyRank == (i1_gl + i2_gl) % iPCount)
+                // Process receives bound values of coefficients
+                // alpha and beta from previous process for current tile.
+                MPI_Recv(pABStartPos, 1, AB_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD, &status );
+            }
+            else {
+                // Process calculates all coefficients alpha(1,i2) and beta(1,i2)
+                for (i2 = 1, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos;
+                     i2 <= iCurTile2_Size;
+                     i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
                 {
-                    MPI_Datatype twoColsType;
-                    MPI_Type_vector( iCurTile2_Size, 2, (iCurTile1_Size + 1) << 1, MPI_DOUBLE, &twoColsType);
-                    MPI_Type_commit(&twoColsType);
-
-                    if (i1_gl != 0)
-                    {
-                        // Process receives bound values of coefficients
-                        // alpha and beta from previous process for current tile.
-                        MPI_Recv(pABStartPos, 1, twoColsType, iPrevRank, tag, MPI_COMM_WORLD, &status );
-                    }
-                    else {
-                        // Process calculates all coefficients alpha(1,i2) and beta(1,i2)
-                        for (i2 = 1, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos;
-                             i2 <= iCurTile2_Size;
-                             i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
-                        {
-                            dCoefA1_L = 0.5 * ( k2 ( 0.0, x2, tPrev ) + k2 ( 0.0, x2 - h2, tPrev ) );
-                            dCoefA1_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev ) + k2 ( 0.0, x2, tPrev ) );
-                            dCoefA2_L = 0.5 * ( k2 ( 0.0, x2, tPrev + tau ) + k2 ( 0.0, x2 - h2, tPrev + tau ) );
-                            dCoefA2_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev + tau ) + k2 ( 0.0, x2, tPrev + tau ) );
-                            eta1 = 0.5 * ( m1 ( x2, tPrev ) + m1 ( x2, tPrev + tau ) ) -
-                                   ( ( dCoefA2_L * m1 ( x2 - h2, tPrev + tau ) - ( dCoefA2_L + dCoefA2_R ) * m1 ( x2, tPrev + tau ) +
-                                       dCoefA2_R * m1 ( x2 + h2, tPrev + tau ) ) -
-                                     ( dCoefA1_L * m1 ( x2 - h2, tPrev ) - ( dCoefA1_L + dCoefA1_R ) * m1 ( x2, tPrev ) +
-                                       dCoefA1_R * m1 ( x2 + h2, tPrev ) ) ) *
-                                   0.5 / h2SquareTau;
-                            kappa1 = 0.0;
-                            pABInLinePos[0] = kappa1;
-                            pABInLinePos[1] = eta1;
-                        }
-                    }
-
-                    // Calculate coefficients alpha[] and beta[] in current tile
-                    for (i2 = 1, x2 = pX2start[i2_gl], pABLine = pABStartPos, pYPrevLine = pYPrevStartPos;
-                         i2 <= iCurTile2_Size;
-                         i2++, x2 += h2, pABLine += (iCurTile1_Size + 1) << 1, pYPrevLine += iX1_YLineSize)
-                    {
-                        // Scan nodes in line of tile and consiquently calculate coefficients alpha and beta
-                        // associated with nodes
-                        x1start = pX1start[i1_gl];
-
-                        dCoefA1_L = 0.5 * (k1(x1start, x2, t) + k1(x1start - h1, x2, t));
-                        for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABLine;
-                             i1 <= iCurTile1_Size;
-                             i1++, x1 += h1, pABInLinePos += 2)
-                        {
-                            // Calculate a1(x1+h1,x2,t), a2(x1,x2,t-tau/2) and a2(x1,x2+h2,t-tau/2).
-                            // Coefficient a1(x1,x2,t) calculated on previous i1-1 iteration of cycle
-                            dCoefA1_R = 0.5 * ( k1 ( x1 + h1, x2, t ) + k1 ( x1, x2, t ) );
-                            dK = k2 ( x1, x2, tPrev );
-                            dCoefA2_L = 0.5 * ( dK + k2 ( x1, x2 - h2, tPrev ) );
-                            dCoefA2_R = 0.5 * ( k2 ( x1, x2 + h2, tPrev ) + dK );
-
-                            // Calculate coefficients A, B, C, F in linear equation
-                            dAValue = dCoefA1_L;
-                            dCValue = dCoefA1_L + dCoefA1_R + h1SquareTau;
-                            dBValue = dCoefA1_R;
-                            dFValue = h1_2Square *
-                                      ( dCoefA2_L * pYPrevLine[i1 - iX1_YLineSize] -
-                                       ( dCoefA2_L + dCoefA2_R ) * pYPrevLine[i1] +
-                                       dCoefA2_R * pYPrevLine[i1 + iX1_YLineSize] ) +
-                                      h1SquareTau * pYPrevLine[i1] + h1Square * f ( x1, x2, tPrev );
-                            dCoefA1_L = dCoefA1_R;
-
-                            // Calculate coefficients alpha(x1,x2+h2) and beta(x1,x2+h2)
-                            dDiv = dCValue - pABInLinePos[0] * dAValue;
-                            pABInLinePos[2] = dBValue / dDiv;
-                            pABInLinePos[3] = (dAValue * pABInLinePos[1] + dFValue) / dDiv;
-                        }
-                    }
-
-                    if (i1_gl != iPCount - 1)
-                    {
-                        // Process sends bound values of coefficients alpha and beta to next process
-                        MPI_Send(pABStartPos + (iCurTile1_Size << 1), 1, twoColsType,
-                                 iNextRank, tag, MPI_COMM_WORLD);
-                    }
+                    dCoefA1_L = 0.5 * ( k2 ( 0.0, x2, tPrev ) + k2 ( 0.0, x2 - h2, tPrev ) );
+                    dCoefA1_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev ) + k2 ( 0.0, x2, tPrev ) );
+                    dCoefA2_L = 0.5 * ( k2 ( 0.0, x2, tPrev + tau ) + k2 ( 0.0, x2 - h2, tPrev + tau ) );
+                    dCoefA2_R = 0.5 * ( k2 ( 0.0, x2 + h2, tPrev + tau ) + k2 ( 0.0, x2, tPrev + tau ) );
+                    eta1 = 0.5 * ( m1 ( x2, tPrev ) + m1 ( x2, tPrev + tau ) ) -
+                           ( ( dCoefA2_L * m1 ( x2 - h2, tPrev + tau ) - ( dCoefA2_L + dCoefA2_R ) * m1 ( x2, tPrev + tau ) +
+                               dCoefA2_R * m1 ( x2 + h2, tPrev + tau ) ) -
+                             ( dCoefA1_L * m1 ( x2 - h2, tPrev ) - ( dCoefA1_L + dCoefA1_R ) * m1 ( x2, tPrev ) +
+                               dCoefA1_R * m1 ( x2 + h2, tPrev ) ) ) *
+                           0.5 / h2SquareTau;
+                    kappa1 = 0.0;
+                    pABInLinePos[0] = kappa1;
+                    pABInLinePos[1] = eta1;
                 }
+            }
+
+            // Calculate coefficients alpha[] and beta[] in current tile
+            for (i2 = 1, x2 = pX2start[i2_gl], pABLine = pABStartPos, pYPrevLine = pYPrevStartPos;
+                 i2 <= iCurTile2_Size;
+                 i2++, x2 += h2, pABLine += (iCurTile1_Size + 1) << 1, pYPrevLine += iX1_YLineSize)
+            {
+                // Scan nodes in line of tile and consiquently calculate coefficients alpha and beta
+                // associated with nodes
+                x1start = pX1start[i1_gl];
+
+                dCoefA1_L = 0.5 * (k1(x1start, x2, t) + k1(x1start - h1, x2, t));
+                for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABLine;
+                     i1 <= iCurTile1_Size;
+                     i1++, x1 += h1, pABInLinePos += 2)
+                {
+                    // Calculate a1(x1+h1,x2,t), a2(x1,x2,t-tau/2) and a2(x1,x2+h2,t-tau/2).
+                    // Coefficient a1(x1,x2,t) calculated on previous i1-1 iteration of cycle
+                    dCoefA1_R = 0.5 * ( k1 ( x1 + h1, x2, t ) + k1 ( x1, x2, t ) );
+                    dK = k2 ( x1, x2, tPrev );
+                    dCoefA2_L = 0.5 * ( dK + k2 ( x1, x2 - h2, tPrev ) );
+                    dCoefA2_R = 0.5 * ( k2 ( x1, x2 + h2, tPrev ) + dK );
+
+                    // Calculate coefficients A, B, C, F in linear equation
+                    dAValue = dCoefA1_L;
+                    dCValue = dCoefA1_L + dCoefA1_R + h1SquareTau;
+                    dBValue = dCoefA1_R;
+                    dFValue = h1_2Square *
+                              ( dCoefA2_L * pYPrevLine[i1 - iX1_YLineSize] -
+                                ( dCoefA2_L + dCoefA2_R ) * pYPrevLine[i1] +
+                                dCoefA2_R * pYPrevLine[i1 + iX1_YLineSize] ) +
+                              h1SquareTau * pYPrevLine[i1] + h1Square * f ( x1, x2, tPrev );
+                    dCoefA1_L = dCoefA1_R;
+
+                    // Calculate coefficients alpha(x1,x2+h2) and beta(x1,x2+h2)
+                    dDiv = dCValue - pABInLinePos[0] * dAValue;
+                    pABInLinePos[2] = dBValue / dDiv;
+                    pABInLinePos[3] = (dAValue * pABInLinePos[1] + dFValue) / dDiv;
+                }
+            }
+
+            if (i1_gl != iPCount - 1)
+            {
+                // Process sends bound values of coefficients alpha and beta to next process
+                MPI_Send(pABStartPos + (iCurTile1_Size << 1), 1, AB_COLUMN_TYPE[i1_gl], iNextRank, tag, MPI_COMM_WORLD);
             }
         }
 
@@ -354,66 +349,56 @@ int main(int argc, char **argv )
              i1_gl >= 0;
              i1_gl--, pABStartPos -= iBufferABTileSize)
         {
-            pYCurrentStartPos = pYCurTileStart[i1_gl] + iX1_YLineSize;
-            iCurTile1_Size = iPLineCountX2[i1_gl];
+            iCurTile1_Size = iTile1_Size[i1_gl];
+            pYCurrentStartPos = pCurYTileStart[i1_gl] + iX1_YLineSize;
+            pYLastCol = pYCurrentStartPos + iCurTile1_Size + 1;
 
-            for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
+            i2_gl = (iMyRank + iPCount - i1_gl) % iPCount;
+            iCurTile2_Size = iTile2_Size[i2_gl];
+
+            if (i1_gl != iPCount - 1)
             {
-                iCurTile2_Size = iPLineCountX1[i2_gl];
-
-                if (iMyRank == (i1_gl + i2_gl) % iPCount)
+                MPI_Recv(pYLastCol, 1, Y_COLUMN_TYPE[i1_gl], iNextRank, tag, MPI_COMM_WORLD, &status );
+            }
+            else {
+                for (i2 = 0, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos + (iCurTile1_Size << 1);
+                     i2 < iCurTile2_Size;
+                     i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
                 {
-                    MPI_Datatype coltype;
-                    MPI_Type_vector( iCurTile2_Size, 1, iX1_YLineSize, MPI_DOUBLE, &coltype);
-                    MPI_Type_commit(&coltype);
-
-                    double* pYLastCol = pYCurrentStartPos + iCurTile1_Size + 1;
-
-                    if (i1_gl != iPCount - 1)
-                    {
-                        MPI_Recv(pYLastCol, 1, coltype, iNextRank, tag, MPI_COMM_WORLD, &status );
-                    }
-                    else {
-                        for (i2 = 0, x2 = pX2start[i2_gl], pABInLinePos = pABStartPos + (iCurTile1_Size << 1);
-                             i2 < iCurTile2_Size;
-                             i2++, x2 += h2, pABInLinePos += (iCurTile1_Size + 1) << 1)
-                        {
-                            dCoefA1_L = 0.5 * ( k2 ( L1, x2, tPrev ) + k2 ( L1, x2 - h2, tPrev ) );
-                            dCoefA1_R = 0.5 * ( k2 ( L1, x2 + h2, tPrev ) + k2 ( L1, x2, tPrev ) );
-                            dCoefA2_L = 0.5 * ( k2 ( L1, x2, tPrev + tau ) + k2 ( L1, x2 - h2, tPrev + tau ) );
-                            dCoefA2_R = 0.5 * ( k2 ( L1, x2 + h2, tPrev + tau ) + k2 ( L1, x2, tPrev + tau ) );
-                            eta2 = 0.5 * ( m2 ( x2, tPrev ) + m2 ( x2, tPrev + tau ) ) -
-                                   ( ( dCoefA2_L * m2 ( x2 - h2, tPrev + tau ) - ( dCoefA2_L + dCoefA2_R ) * m2 ( x2, tPrev + tau ) +
-                                       dCoefA2_R * m2 ( x2 + h2, tPrev + tau ) ) -
-                                     ( dCoefA1_L * m2 ( x2 - h2, tPrev ) - ( dCoefA1_L + dCoefA1_R ) * m2 ( x2, tPrev ) +
-                                       dCoefA1_R * m2 ( x2 + h2, tPrev ) ) ) *
-                                   0.5 / h2SquareTau;
-                            kappa2 = 0.0;
-                            pYLastCol[i2 * iX1_YLineSize] = (eta2 + kappa2 * pABInLinePos[1]) / (1 - kappa2 * pABInLinePos[0]);
-                        }
-                    }
-
-                    // Calculate solution in current tile.
-                    // Scan lines of tile (line is a set of tile nodes with fixed i2)
-                    for (i2 = 0, pABLine = pABStartPos + (iCurTile1_Size << 1), pYCurrentLine = pYCurrentStartPos;
-                         i2 < iCurTile2_Size;
-                         i2++, pABLine += (iCurTile1_Size + 1) << 1, pYCurrentLine += iX1_YLineSize)
-                    {
-                        // Scan nodes in line and consiquently calculate solution associated with nodes
-                        for (i1 = iCurTile1_Size + 1, pABInLinePos = pABLine;
-                             i1 > 0;
-                             i1--, pABInLinePos -= 2)
-                        {
-                            pYCurrentLine[i1 - 1] = pABInLinePos[0] * pYCurrentLine[i1] + pABInLinePos[1];
-                        }
-                    }
-
-                    // Process sends bound values of solution to previous process.
-                    if (i1_gl != 0)
-                    {
-                        MPI_Send(pYCurrentStartPos + 1, 1, coltype, iPrevRank, tag, MPI_COMM_WORLD);
-                    }
+                    dCoefA1_L = 0.5 * ( k2 ( L1, x2, tPrev ) + k2 ( L1, x2 - h2, tPrev ) );
+                    dCoefA1_R = 0.5 * ( k2 ( L1, x2 + h2, tPrev ) + k2 ( L1, x2, tPrev ) );
+                    dCoefA2_L = 0.5 * ( k2 ( L1, x2, tPrev + tau ) + k2 ( L1, x2 - h2, tPrev + tau ) );
+                    dCoefA2_R = 0.5 * ( k2 ( L1, x2 + h2, tPrev + tau ) + k2 ( L1, x2, tPrev + tau ) );
+                    eta2 = 0.5 * ( m2 ( x2, tPrev ) + m2 ( x2, tPrev + tau ) ) -
+                           ( ( dCoefA2_L * m2 ( x2 - h2, tPrev + tau ) - ( dCoefA2_L + dCoefA2_R ) * m2 ( x2, tPrev + tau ) +
+                               dCoefA2_R * m2 ( x2 + h2, tPrev + tau ) ) -
+                             ( dCoefA1_L * m2 ( x2 - h2, tPrev ) - ( dCoefA1_L + dCoefA1_R ) * m2 ( x2, tPrev ) +
+                               dCoefA1_R * m2 ( x2 + h2, tPrev ) ) ) *
+                           0.5 / h2SquareTau;
+                    kappa2 = 0.0;
+                    pYLastCol[i2 * iX1_YLineSize] = (eta2 + kappa2 * pABInLinePos[1]) / (1 - kappa2 * pABInLinePos[0]);
                 }
+            }
+
+            // Calculate solution in current tile.
+            // Scan lines of tile (line is a set of tile nodes with fixed i2)
+            for (i2 = 0, pABLine = pABStartPos + (iCurTile1_Size << 1), pYCurrentLine = pYCurrentStartPos;
+                 i2 < iCurTile2_Size;
+                 i2++, pABLine += (iCurTile1_Size + 1) << 1, pYCurrentLine += iX1_YLineSize)
+            {
+                // Scan nodes in line and consiquently calculate solution associated with nodes
+                for (i1 = iCurTile1_Size + 1, pABInLinePos = pABLine;
+                     i1 > 0;
+                     i1--, pABInLinePos -= 2)
+                {
+                    pYCurrentLine[i1 - 1] = pABInLinePos[0] * pYCurrentLine[i1] + pABInLinePos[1];
+                }
+            }
+
+            // Process sends bound values of solution to previous process.
+            if (i1_gl != 0)
+            {
+                MPI_Send(pYCurrentStartPos + 1, 1, Y_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD);
             }
         }
 
@@ -426,87 +411,82 @@ int main(int argc, char **argv )
 
         // Shift solution obtained on j-1 step
         swap_pointers_d(&yCurrent, &yPrev);
-        swap_pointers(&pYCurTileStart, &pYPrevTileStart);
+        swap_pointers(&pCurYTileStart, &pPrevYTileStart);
 
         ///////////////////////////////////////////////////////////////////////////////////////
         // First (forward) stage of progonka - calculation of coefficients alpha[] and beta[]
 
         for (i2_gl = 0; i2_gl < iPCount; i2_gl++)
         {
-            iCurTile2_Size = iPLineCountX1[i2_gl];
+            iCurTile2_Size = iTile2_Size[i2_gl];
 
-            for (i1_gl = 0, pABStartPos = dAlphaBeta, pYPrevStartPos = yPrev + iX1_YLineSize;
-                 i1_gl < iPCount;
-                 i1_gl++, pABStartPos += iBufferABTileSize, pYPrevStartPos += iCurTile1_Size + 2)
+            i1_gl = (iMyRank + iPCount - i2_gl) % iPCount;
+            iCurTile1_Size = iTile1_Size[i1_gl];
+            pYPrevStartPos = pPrevYTileStart[i1_gl] + iX1_YLineSize;
+            pABStartPos = dAlphaBeta + i1_gl * iBufferABTileSize;
+
+            if (i2_gl != 0)
             {
-                iCurTile1_Size = iPLineCountX2[i1_gl];
-
-                if (iMyRank == (i1_gl + i2_gl) % iPCount)
+                // Process receives bound values of coefficients alpha and beta from previous process.
+                MPI_Recv(pABStartPos, iCurTile1_Size << 1, MPI_DOUBLE, iPrevRank, tag, MPI_COMM_WORLD, &status);
+            }
+            else {
+                // Process calculates all coefficients alpha(i1,1) and beta(i1,1)
+                for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABStartPos;
+                     i1 <= iCurTile1_Size;
+                     i1++, x1 += h1, pABInLinePos += 2)
                 {
-                    if (i2_gl != 0)
-                    {
-                        // Process receives bound values of coefficients alpha and beta from previous process.
-                        MPI_Recv(pABStartPos, iCurTile1_Size << 1, MPI_DOUBLE, iPrevRank, tag, MPI_COMM_WORLD, &status);
-                    }
-                    else {
-                        // Process calculates all coefficients alpha(i1,1) and beta(i1,1)
-                        for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABStartPos;
-                             i1 <= iCurTile1_Size;
-                             i1++, x1 += h1, pABInLinePos += 2)
-                        {
-                            kappa1 = 0.0;
-                            eta1 = m3(x1, t);
-                            pABInLinePos[0] = kappa1;
-                            pABInLinePos[1] = eta1;
-                        }
-                    }
-
-                    // Calculate coefficients alpha[] and beta[] in current tile
-                    for (i2 = 1, x2 = pX2start[i2_gl], pABLine = pABStartPos, pYPrevLine = pYPrevStartPos;
-                         i2 <= iCurTile2_Size;
-                         i2++, x2 += h2, pABLine += iCurTile1_Size << 1, pYPrevLine += iX1_YLineSize)
-                    {
-                        // Scan nodes in line of tile and consiquently calculate coefficients alpha and beta
-                        // associated with nodes
-                        x1start = pX1start[i1_gl];
-
-                        dCoefA1_L = 0.5 * (k1(x1start, x2, tPrevSub) + k1(x1start - h1, x2, tPrevSub));
-                        for (i1 = 1, x1 = x1start, pABInLinePos = pABLine;
-                             i1 <= iCurTile1_Size;
-                             i1++, x1 += h1, pABInLinePos += 2)
-                        {
-                            // Mesh node is fixed by current value of (x1,x2).
-                            // Calculate a1(x1+h1,x2,t), a2(x1,x2,t-tau/2) and a2(x1,x2+h2,t-tau/2).
-                            // Coefficient a1(x1,x2,t) calculated on previous i1-1 iteration of cycle
-                            dCoefA1_R = 0.5 * (k1(x1 + h1, x2, tPrevSub) + k1(x1, x2, tPrevSub));
-                            dK = k2(x1, x2, t);
-                            dCoefA2_L = 0.5 * (dK + k2(x1, x2 - h2, t));
-                            dCoefA2_R = 0.5 * (k2(x1, x2 + h2, t) + dK);
-
-                            // Calculate coefficients A, B, C, F in linear equation.
-                            dAValue = dCoefA2_L;
-                            dCValue = dCoefA2_L + dCoefA2_R + h2SquareTau;
-                            dBValue = dCoefA2_R;
-                            dFValue = h2_1Square *
-                                      (dCoefA1_L * pYPrevLine[i1 - 1] -
-                                       (dCoefA1_L + dCoefA1_R) * pYPrevLine[i1] +
-                                       dCoefA1_R * pYPrevLine[i1 + 1]) +
-                                      h2SquareTau * pYPrevLine[i1] + h2Square * f(x1, x2, tPrev);
-                            dCoefA1_L = dCoefA1_R;
-
-                            // Calculate coefficients alpha(x1,x2+h2) and beta(x1,x2+h2)
-                            dDiv = dCValue - pABInLinePos[0] * dAValue;
-                            pABInLinePos[iCurTile1_Size << 1] = dBValue / dDiv;
-                            pABInLinePos[(iCurTile1_Size << 1) + 1] = (dAValue * pABInLinePos[1] + dFValue) / dDiv;
-                        }
-                    }
-
-                    // Process sends bound values of coefficients alpha and beta to next process.
-                    if (i2_gl != iPCount - 1)
-                    {
-                        MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
-                    }
+                    kappa1 = 0.0;
+                    eta1 = m3(x1, t);
+                    pABInLinePos[0] = kappa1;
+                    pABInLinePos[1] = eta1;
                 }
+            }
+
+            // Calculate coefficients alpha[] and beta[] in current tile
+            for (i2 = 1, x2 = pX2start[i2_gl], pABLine = pABStartPos, pYPrevLine = pYPrevStartPos;
+                 i2 <= iCurTile2_Size;
+                 i2++, x2 += h2, pABLine += iCurTile1_Size << 1, pYPrevLine += iX1_YLineSize)
+            {
+                // Scan nodes in line of tile and consiquently calculate coefficients alpha and beta
+                // associated with nodes
+                x1start = pX1start[i1_gl];
+
+                dCoefA1_L = 0.5 * (k1(x1start, x2, tPrevSub) + k1(x1start - h1, x2, tPrevSub));
+                for (i1 = 1, x1 = x1start, pABInLinePos = pABLine;
+                     i1 <= iCurTile1_Size;
+                     i1++, x1 += h1, pABInLinePos += 2)
+                {
+                    // Mesh node is fixed by current value of (x1,x2).
+                    // Calculate a1(x1+h1,x2,t), a2(x1,x2,t-tau/2) and a2(x1,x2+h2,t-tau/2).
+                    // Coefficient a1(x1,x2,t) calculated on previous i1-1 iteration of cycle
+                    dCoefA1_R = 0.5 * (k1(x1 + h1, x2, tPrevSub) + k1(x1, x2, tPrevSub));
+                    dK = k2(x1, x2, t);
+                    dCoefA2_L = 0.5 * (dK + k2(x1, x2 - h2, t));
+                    dCoefA2_R = 0.5 * (k2(x1, x2 + h2, t) + dK);
+
+                    // Calculate coefficients A, B, C, F in linear equation.
+                    dAValue = dCoefA2_L;
+                    dCValue = dCoefA2_L + dCoefA2_R + h2SquareTau;
+                    dBValue = dCoefA2_R;
+                    dFValue = h2_1Square *
+                              (dCoefA1_L * pYPrevLine[i1 - 1] -
+                               (dCoefA1_L + dCoefA1_R) * pYPrevLine[i1] +
+                               dCoefA1_R * pYPrevLine[i1 + 1]) +
+                              h2SquareTau * pYPrevLine[i1] + h2Square * f(x1, x2, tPrev);
+                    dCoefA1_L = dCoefA1_R;
+
+                    // Calculate coefficients alpha(x1,x2+h2) and beta(x1,x2+h2)
+                    dDiv = dCValue - pABInLinePos[0] * dAValue;
+                    pABInLinePos[iCurTile1_Size << 1] = dBValue / dDiv;
+                    pABInLinePos[(iCurTile1_Size << 1) + 1] = (dAValue * pABInLinePos[1] + dFValue) / dDiv;
+                }
+            }
+
+            // Process sends bound values of coefficients alpha and beta to next process.
+            if (i2_gl != iPCount - 1)
+            {
+                MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
             }
         }
 
@@ -515,70 +495,65 @@ int main(int argc, char **argv )
 
         for (i2_gl = iPCount - 1; i2_gl >= 0; i2_gl--)
         {
-            iCurTile2_Size = iPLineCountX1[i2_gl];
+            iCurTile2_Size = iTile2_Size[i2_gl];
 
-            for (i1_gl = 0, pABStartPos = dAlphaBeta, pYCurrentStartPos = yCurrent;
-                 i1_gl < iPCount;
-                 i1_gl++, pABStartPos += iBufferABTileSize, pYCurrentStartPos += iCurTile1_Size + 2)
+            i1_gl = (iMyRank + iPCount - i2_gl) % iPCount;
+            iCurTile1_Size = iTile1_Size[i1_gl];
+            pYCurrentStartPos = pCurYTileStart[i1_gl];
+            pABStartPos = dAlphaBeta + i1_gl * iBufferABTileSize;
+
+            pABLastLine = pABStartPos + iCurTile2_Size * (iCurTile1_Size << 1);
+            pYLastLine = pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize;
+
+            if (i2_gl != iPCount - 1)
             {
-                iCurTile1_Size = iPLineCountX2[i1_gl];
-
-                if (iMyRank == (i1_gl + i2_gl) % iPCount)
+                MPI_Recv(pYLastLine + 1, iCurTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &status);
+            }
+            else {
+                for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABLastLine;
+                     i1 <= iCurTile1_Size;
+                     i1++, x1 += h1, pABInLinePos += 2)
                 {
-                    pABLastLine = pABStartPos + iCurTile2_Size * (iCurTile1_Size << 1);
-                    pYLastLine = pYCurrentStartPos + (iCurTile2_Size + 1) * iX1_YLineSize;
+                    kappa2 = 0.0;
+                    eta2 = m4(x1, t);
+                    pYLastLine[i1] = (eta2 + kappa2 * pABInLinePos[1]) / (1 - kappa2 * pABInLinePos[0]);
+                }
+            }
 
-                    if (i2_gl != iPCount - 1)
-                    {
-                        MPI_Recv(pYLastLine + 1, iCurTile1_Size, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &status);
-                    }
-                    else {
-                        for (i1 = 1, x1 = pX1start[i1_gl], pABInLinePos = pABLastLine;
-                             i1 <= iCurTile1_Size;
-                             i1++, x1 += h1, pABInLinePos += 2)
-                        {
-                            kappa2 = 0.0;
-                            eta2 = m4(x1, t);
-                            pYLastLine[i1] = (eta2 + kappa2 * pABInLinePos[1]) / (1 - kappa2 * pABInLinePos[0]);
-                        }
-                    }
+            // Calculate solution in current tile.
+            // Scan lines of tile (the line is a set of tile nodes with fixed i2)
+            for (i2 = iCurTile2_Size, pABLine = pABLastLine, pYCurrentLine = pYLastLine;
+                 i2 >= 0;
+                 i2--, pABLine -= iCurTile1_Size << 1, pYCurrentLine -= iX1_YLineSize)
+            {
+                // Scan nodes in line and consiquently calculate solution associated with nodes
+                for (i1 = 1, pABInLinePos = pABLine;
+                     i1 <= iCurTile1_Size;
+                     i1++, pABInLinePos += 2)
+                {
+                    pYCurrentLine[i1 - iX1_YLineSize] = pABInLinePos[0] * pYCurrentLine[i1] + pABInLinePos[1];
+                }
+            }
 
-                    // Calculate solution in current tile.
-                    // Scan lines of tile (the line is a set of tile nodes with fixed i2)
-                    for (i2 = iCurTile2_Size, pABLine = pABLastLine, pYCurrentLine = pYLastLine;
-                         i2 >= 0;
-                         i2--, pABLine -= iCurTile1_Size << 1, pYCurrentLine -= iX1_YLineSize)
-                    {
-                        // Scan nodes in line and consiquently calculate solution associated with nodes
-                        for (i1 = 1, pABInLinePos = pABLine;
-                             i1 <= iCurTile1_Size;
-                             i1++, pABInLinePos += 2)
-                        {
-                            pYCurrentLine[i1 - iX1_YLineSize] = pABInLinePos[0] * pYCurrentLine[i1] + pABInLinePos[1];
-                        }
-                    }
+            // Process sends bound values of solution to previous process.
+            if (i2_gl != 0)
+            {
+                MPI_Send(pYCurrentLine + iX1_YLineSize + 1, iCurTile1_Size, MPI_DOUBLE,
+                         iPrevRank, tag, MPI_COMM_WORLD);
+            }
 
-                    // Process sends bound values of solution to previous process.
-                    if (i2_gl != 0)
-                    {
-                        MPI_Send(pYCurrentLine + iX1_YLineSize + 1, iCurTile1_Size, MPI_DOUBLE,
-                                  iPrevRank, tag, MPI_COMM_WORLD);
-                    }
-
-                    // Initialize boundary values at x1 = 0 and x1 = L1
-                    if (i1_gl == 0 || i1_gl == iPCount - 1)
-                    {
-                        p = yCurrent;
-                        for (i2 = 0, x2 = pX2start[i2_gl] - h2;
-                             i2 <= iCurTile2_Size + 1;
-                             i2++, x2 += h2, p += iX1_YLineSize)
-                        {
-                            if (i1_gl == 0)
-                                p[0] = m1(x2, t);
-                            else
-                                p[iX1_YLineSize - 1] = m2(x2, t);
-                        }
-                    }
+            // Initialize boundary values at x1 = 0 and x1 = L1
+            if (i1_gl == 0 || i1_gl == iPCount - 1)
+            {
+                p = yCurrent;
+                for (i2 = 0, x2 = pX2start[i2_gl] - h2;
+                     i2 <= iCurTile2_Size + 1;
+                     i2++, x2 += h2, p += iX1_YLineSize)
+                {
+                    if (i1_gl == 0)
+                        p[0] = m1(x2, t);
+                    else
+                        p[iX1_YLineSize - 1] = m2(x2, t);
                 }
             }
         }
@@ -603,15 +578,16 @@ int main(int argc, char **argv )
          i2_gl < iPCount;
          i2_gl++, dYStartPos += iLinesCount * (n1 + 1))
     {
-        iLinesCount = iPLineCountX1[i2_gl];
+        iLinesCount = iTile2_Size[i2_gl];
         if ( i2_gl == iPCount - 1 || i2_gl == 0 )
             iLinesCount++;
 
-        for (i1_gl = 0, pYCurrentStartPos = yCurrent, p = dYStartPos;
+        for (i1_gl = 0, p = dYStartPos;
              i1_gl < iPCount;
-             i1_gl++, pYCurrentStartPos += iCurTile1_Size + 2, p += iLineSize)
+             i1_gl++, p += iLineSize)
         {
-            iCurTile1_Size = iPLineCountX2[i1_gl];
+            pYCurrentStartPos = pCurYTileStart[i1_gl];
+            iCurTile1_Size = iTile1_Size[i1_gl];
             iLineSize = iCurTile1_Size;
             if ( i1_gl == iPCount - 1 || i1_gl == 0 )
                 iLineSize++;
@@ -688,13 +664,15 @@ int main(int argc, char **argv )
 
 
     if ( dY != NULL ) free ( dY );
-    if ( pYCurTileStart != NULL ) free ( pYCurTileStart );
-    if ( pYPrevTileStart != NULL ) free ( pYPrevTileStart );
+    if ( pCurYTileStart != NULL ) free ( pCurYTileStart );
+    if ( pPrevYTileStart != NULL ) free ( pPrevYTileStart );
+    if ( AB_COLUMN_TYPE != NULL ) free ( AB_COLUMN_TYPE );
+    if ( Y_COLUMN_TYPE != NULL ) free ( Y_COLUMN_TYPE );
     if ( yCurrent != NULL ) free ( yCurrent );
     if ( yPrev != NULL ) free ( yPrev );
     if ( dAlphaBeta != NULL ) free ( dAlphaBeta );
-    if ( iPLineCountX1 != NULL ) free ( iPLineCountX1 );
-    if ( iPLineCountX2 != NULL ) free ( iPLineCountX2 );
+    if ( iTile2_Size != NULL ) free ( iTile2_Size );
+    if ( iTile1_Size != NULL ) free ( iTile1_Size );
     if ( pX1start != NULL ) free ( pX1start );
     if ( pX2start != NULL ) free ( pX2start );
     if ( FL != NULL ) fclose ( FL );
