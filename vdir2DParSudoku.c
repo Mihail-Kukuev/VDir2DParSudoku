@@ -95,6 +95,8 @@ int main(int argc, char **argv )
     // Mesh line fixed by value of coordinate i1.
     int tag = 0;
     MPI_Status status;
+    MPI_Request recvRequest = MPI_REQUEST_NULL;
+    MPI_Request sendRequest = MPI_REQUEST_NULL;
     FILE *FL = NULL;
 
     clock_t cp1, cp2;
@@ -272,7 +274,7 @@ int main(int argc, char **argv )
             {
                 // Process receives bound values of coefficients
                 // alpha and beta from previous process for current tile.
-                MPI_Recv(pABStartPos, 1, AB_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD, &status );
+                MPI_Recv(pABStartPos, 1, AB_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD, &status);
             }
             else {
                 // Process calculates all coefficients alpha(1,i2) and beta(1,i2)
@@ -338,9 +340,13 @@ int main(int argc, char **argv )
             if (i1_gl != iPCount - 1)
             {
                 // Process sends bound values of coefficients alpha and beta to next process
-                MPI_Send(pABStartPos + (iCurTile1_Size << 1), 1, AB_COLUMN_TYPE[i1_gl], iNextRank, tag, MPI_COMM_WORLD);
+                MPI_Wait(&sendRequest, &status);
+                MPI_Isend(pABStartPos + (iCurTile1_Size << 1), 1, AB_COLUMN_TYPE[i1_gl],
+                          iNextRank, tag, MPI_COMM_WORLD, &sendRequest);
             }
         }
+
+        MPI_Wait(&sendRequest, &status);
 
         ////////////////////////////////////////////////////////////////////////////////////
         // Second (reverse) stage of progonka - calculation of solution.
@@ -398,9 +404,12 @@ int main(int argc, char **argv )
             // Process sends bound values of solution to previous process.
             if (i1_gl != 0)
             {
-                MPI_Send(pYCurrentStartPos + 1, 1, Y_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD);
+                MPI_Wait(&sendRequest, &status);
+                MPI_Isend(pYCurrentStartPos + 1, 1, Y_COLUMN_TYPE[i1_gl], iPrevRank, tag, MPI_COMM_WORLD, &sendRequest);
             }
         }
+
+        MPI_Wait(&sendRequest, &status);
 
         //--------------------------------------------------------//
         //   Calculate mesh function on j layer in direction x2   //
@@ -486,9 +495,12 @@ int main(int argc, char **argv )
             // Process sends bound values of coefficients alpha and beta to next process.
             if (i2_gl != iPCount - 1)
             {
-                MPI_Send(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD);
+                MPI_Wait(&sendRequest, &status);
+                MPI_Isend(pABLine, iCurTile1_Size << 1, MPI_DOUBLE, iNextRank, tag, MPI_COMM_WORLD, &sendRequest);
             }
         }
+
+        MPI_Wait(&sendRequest, &status);
 
         ////////////////////////////////////////////////////////////////////////////////////
         // Second (reverse) stage of progonka - calculation of solution.
@@ -538,8 +550,9 @@ int main(int argc, char **argv )
             // Process sends bound values of solution to previous process.
             if (i2_gl != 0)
             {
-                MPI_Send(pYCurrentLine + iX1_YLineSize + 1, iCurTile1_Size, MPI_DOUBLE,
-                         iPrevRank, tag, MPI_COMM_WORLD);
+                MPI_Wait(&sendRequest, &status);
+                MPI_Isend(pYCurrentLine + iX1_YLineSize + 1, iCurTile1_Size, MPI_DOUBLE,
+                         iPrevRank, tag, MPI_COMM_WORLD, &sendRequest);
             }
 
             // Initialize boundary values at x1 = 0 and x1 = L1
@@ -557,6 +570,8 @@ int main(int argc, char **argv )
                 }
             }
         }
+
+        MPI_Wait(&sendRequest, &status);
         tag++;
     }
 
@@ -571,7 +586,6 @@ int main(int argc, char **argv )
         dY = (double *) calloc((n1 + 1) * (n2 + 1), sizeof(double));
     }
 
-    MPI_Request recvReq;
     double *dYStartPos;
     int iLinesCount, iLineSize;
     for (i2_gl = 0, dYStartPos = dY;
@@ -606,7 +620,7 @@ int main(int argc, char **argv )
                 MPI_Datatype blocktype;
                 MPI_Type_vector(iLinesCount, iLineSize, n1 + 1, MPI_DOUBLE, &blocktype);
                 MPI_Type_commit(&blocktype);
-                MPI_Irecv(p, 1, blocktype, iCurProc, tag, MPI_COMM_WORLD, &recvReq);
+                MPI_Irecv(p, 1, blocktype, iCurProc, tag, MPI_COMM_WORLD, &recvRequest);
             }
 
             if (iMyRank == iCurProc)
@@ -618,7 +632,7 @@ int main(int argc, char **argv )
             }
 
             if (iMyRank == 0)
-                MPI_Wait(&recvReq, &status);
+                MPI_Wait(&recvRequest, &status);
         }
     }
 
